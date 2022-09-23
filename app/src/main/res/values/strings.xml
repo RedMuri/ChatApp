@@ -7,4 +7,5 @@
     <string name="text_view_do_not_have_account">I don\'t have account</string>
     <string name="button_register">Register</string>
     <string name="edit_text_message">Edit message...</string>
+    <string name="image">image</string>
 </resources>

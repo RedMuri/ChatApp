@@ -1,7 +1,7 @@
 package com.example.chatapp
 
 import android.content.Intent
-import androidx.appcompat.app.AppCompatActivity
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.view.Menu
@@ -9,22 +9,20 @@ import android.view.MenuInflater
 import android.view.MenuItem
 import android.widget.EditText
 import android.widget.ImageButton
-import android.widget.Toast
-import androidx.activity.result.ActivityResultCallback
-import androidx.activity.result.ActivityResultCaller
+import androidx.activity.result.ActivityResult
 import androidx.activity.result.ActivityResultLauncher
-import androidx.core.app.ActivityOptionsCompat
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.firebase.ui.auth.AuthUI
 import com.firebase.ui.auth.FirebaseAuthUIActivityResultContract
 import com.firebase.ui.auth.data.model.FirebaseAuthUIAuthenticationResult
 import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.firestore.EventListener
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ktx.toObject
-import com.google.firebase.firestore.ktx.toObjects
-import com.google.firebase.ktx.Firebase
+import com.google.firebase.storage.FirebaseStorage
+import com.google.firebase.storage.StorageReference
 
 class ChatActivity : AppCompatActivity() {
     private lateinit var recyclerViewMessages: RecyclerView
@@ -34,8 +32,11 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var messagesAdapter: MessagesAdapter
     private lateinit var db: FirebaseFirestore
     private lateinit var auth: FirebaseAuth
-    private val author = "Muri"
     private lateinit var signInLauncher: ActivityResultLauncher<Intent>
+    private lateinit var getImageLauncher: ActivityResultLauncher<Intent>
+    private lateinit var storage: FirebaseStorage
+    private lateinit var storageReference: StorageReference
+    private lateinit var imagesReference: StorageReference
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,37 +48,71 @@ class ChatActivity : AppCompatActivity() {
         messagesAdapter = MessagesAdapter()
         db = FirebaseFirestore.getInstance()
         auth = FirebaseAuth.getInstance()
+        storage = FirebaseStorage.getInstance()
+        storageReference = storage.reference
+        imagesReference = storageReference.child("images")
 
         recyclerViewMessages.adapter = messagesAdapter
-        recyclerViewMessages.layoutManager = LinearLayoutManager(this, LinearLayoutManager.VERTICAL, false)
+        recyclerViewMessages.layoutManager =
+            LinearLayoutManager(this, LinearLayoutManager.VERTICAL, false)
 
         signInLauncher = registerForActivityResult(
             FirebaseAuthUIActivityResultContract()
         ) { result -> this.onSignInResult(result) }
 
-        buttonSend.setOnClickListener { sendMessage() }
-        loadFromDB()
+        getImageLauncher = registerForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+            this.onGetImageResult(result)
+        }
+
+        buttonSend.setOnClickListener { sendMessage(editTextMessage.text.toString().trim(), null) }
+        buttonAddImage.setOnClickListener { openGetImageActivity() }
     }
 
     private fun onSignInResult(result: FirebaseAuthUIAuthenticationResult) {
         val response = result.idpResponse
-        Log.i("muri","response: $response")
+        Log.i("muri", "onSignInResult: $response")
         if (result.resultCode == RESULT_OK) {
-            // Successfully signed in
-            val user = FirebaseAuth.getInstance().currentUser
-            // ...
+            Log.i("muri", "onSignInResult success")
         } else {
-            Log.i("muri",response?.error?.message.toString())
-            // Sign in failed. If response is null the user canceled the
-            // sign-in flow using the back button. Otherwise check
-            // response.getError().getErrorCode() and handle the error.
-            // ...
+            Log.i("muri", "onSignInResult: "+response?.error?.message.toString())
         }
     }
 
-    private fun signOut(){
+    private fun openGetImageActivity() {
+        val intent = Intent(Intent.ACTION_GET_CONTENT)
+        intent.type = "image/jpeg"
+        intent.putExtra(Intent.EXTRA_LOCAL_ONLY, true)
+        getImageLauncher.launch(intent)
+    }
+
+    private fun onGetImageResult(result: ActivityResult) {
+        val uri = result.data?.data
+        val uriRef = uri?.lastPathSegment?.let { imagesReference.child(it) }
+        uriRef?.let { ref ->
+            ref.putFile(uri).continueWithTask { task ->
+                if (!task.isSuccessful) {
+                    task.exception?.let {
+                        Log.i("muri", "onGetImageResult: " + it.message.toString())
+                    }
+                }
+                ref.downloadUrl
+            }.addOnCompleteListener { task ->
+                if (task.isSuccessful) {
+                    val downloadUri = task.result
+                    sendMessage(null, downloadUri)
+                    Log.i("muri", "onGetImageResult: $downloadUri")
+                } else {
+                    Log.i("muri", "onGetImageResult: "+task.exception.toString())
+                }
+            }
+        }
+    }
+
+    private fun signOut() {
         auth.signOut()
-        Log.i("muri","in sign out")
+        Log.i("muri", "signOut")
         // Choose authentication providers
         val providers = arrayListOf(
             AuthUI.IdpConfig.EmailBuilder().build(),
@@ -91,43 +126,61 @@ class ChatActivity : AppCompatActivity() {
         signInLauncher.launch(signInIntent)
     }
 
-    private fun loadFromDB(){
+    override fun onResume() {
+        loadFromDB()
+        super.onResume()
+    }
+
+    private fun loadFromDB() {
         db.collection("messages").orderBy("date").addSnapshotListener { value, e ->
-            if (value!=null) {
-                val messages = value.map { it.toObject<Message>() }
-                messagesAdapter.setMessages(ArrayList(messages))
-                recyclerViewMessages.scrollToPosition(messagesAdapter.itemCount-1)
+            if (value != null) {
+                try {
+                    val messages = value.map { it.toObject<Message>() }
+                    Log.i("muri", "loadFromDB: $messages")
+                    messagesAdapter.setMessages(ArrayList(messages))
+                }catch (e: Exception){
+                    Log.i("muri","loadFromDB: "+e.message.toString())
+                }
+                recyclerViewMessages.scrollToPosition(messagesAdapter.itemCount - 1)
             } else
-                Log.i("muri","value null")
+                Log.i("muri", "loadFromDB: "+"value null")
             if (e != null) {
-                Log.i("muri", e.message.toString())
+                Log.i("muri", "loadFromDB: "+e.message.toString())
             }
         }
         val currentUser = auth.currentUser
-        if (currentUser==null) {
-            val intent = Intent(this,RegisterActivity::class.java)
+        if (currentUser == null) {
+            val intent = Intent(this, RegisterActivity::class.java)
             startActivity(intent)
         }
     }
 
-    private fun sendMessage() {
-        val message = editTextMessage.text.toString().trim()
-        if (message.isNotEmpty()) {
-            db.collection("messages").add(Message(author, message, System.currentTimeMillis()))
+    private fun sendMessage(textOfMessage: String?, urlToImage: Uri?) {
+        val message: Message
+        val currentAuthor = auth.currentUser?.email?.substringBefore("@")
+        val date = System.currentTimeMillis()
+        if (!textOfMessage.isNullOrEmpty()) {
+            message = Message(currentAuthor, textOfMessage, date)
             editTextMessage.setText("")
-        } else {
-            Toast.makeText(this, "Empty", Toast.LENGTH_SHORT).show()
+            db.collection("messages").add(message).addOnCompleteListener {
+                Log.i("muri", "sendMessage: $it")
+            }
+        } else if (urlToImage != null) {
+            message = Message(currentAuthor, null, date, urlToImage.toString())
+            db.collection("messages").add(message).addOnCompleteListener {
+                Log.i("muri", "sendMessage: $it")
+            }
         }
     }
 
     override fun onCreateOptionsMenu(menu: Menu?): Boolean {
         val menuInflater = MenuInflater(this)
-        menuInflater.inflate(R.menu.menu_main,menu)
+        menuInflater.inflate(R.menu.menu_main, menu)
         return super.onCreateOptionsMenu(menu)
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        if (item.itemId == R.id.menu_item_sign_out){
+        if (item.itemId == R.id.menu_item_sign_out) {
             signOut()
         }
         return super.onOptionsItemSelected(item)
